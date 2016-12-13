@@ -25,7 +25,7 @@
       "copies": [
         {
           "destination": "<(module_root_dir)",
-          "files": ["<(module_root_dir)/build/Release/nodereport.node"]
+          "files": ["<(PRODUCT_DIR)/nodereport.node"]
         }]
     },
   ],
