@@ -674,22 +674,16 @@ static void PrintVersionInformation(std::ostream& out) {
       }
       out <<  "\nOS version: " << os_name << "\n";
 
-      if (os_info->sv101_comment != NULL) {
-        out << "\nMachine: " << os_info->sv101_name << " "
-            <<  os_info->sv101_comment << "\n";
-      } else {
-        out << "\nMachine: " << os_info->sv101_name << "\n";
-      }
       if (os_info != NULL) {
         NetApiBufferFree(os_info);
       }
     } else {
-      TCHAR machine_name[256];
-      DWORD machine_name_size = 256;
       out << "\nOS version: Windows\n";
-      if (GetComputerName(machine_name, &machine_name_size)) {
-        out << "\nMachine: " << machine_name << "\n";
-      }
+    }
+    TCHAR machine_name[256];
+    DWORD machine_name_size = 256;
+    if (GetComputerName(machine_name, &machine_name_size)) {
+      out << "\nMachine: " << machine_name << "\n";
     }
   }
 #else
