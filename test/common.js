@@ -123,7 +123,7 @@ exports.validateContent = function validateContent(data, t, options) {
     'System Information section contains node-report library.');
 };
 
-const getSection = (report, section) => {
+const getSection = exports.getSection = (report, section) => {
   const re = new RegExp('==== ' + section + ' =+' + reNewline + '+([\\S\\s]+?)'
                         + reNewline + '+={80}' + reNewline);
   const match = re.exec(report);
