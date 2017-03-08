@@ -597,7 +597,7 @@ static void walkHandle(uv_handle_t* h, void* arg) {
       // SIGWINCH is used by libuv so always appears.
       // See http://docs.libuv.org/en/v1.x/signal.html
       type = "signal";
-      data << "signum: " << handle->signal.signum
+      data << "signum: " << handle->signal.signum << " "
       // node::signo_string() is not exported by Node.js on Windows.
 #ifndef _WIN32
            << "(" << node::signo_string(handle->signal.signum) << ")"
