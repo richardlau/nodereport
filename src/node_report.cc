@@ -488,6 +488,90 @@ void GetNodeReport(Isolate* isolate, DumpEvent event, const char* message, const
   WriteNodeReport(isolate, event, message, location, nullptr, out, &tm_struct);
 }
 
+static void reportEndpoints(uv_handle_t* h, std::ostringstream* out) {
+  struct sockaddr_storage addr_storage;
+  struct sockaddr* addr = (sockaddr*)&addr_storage;
+  char hostbuf[NI_MAXHOST];
+  char portbuf[NI_MAXSERV];
+  uv_any_handle* handle = (uv_any_handle*)h;
+  int addr_size = sizeof(addr_storage);
+  int rc = -1;
+
+  switch (h->type) {
+    case UV_UDP: {
+      rc = uv_udp_getsockname(&(handle->udp), addr, &addr_size);
+      break;
+    }
+    case UV_TCP: {
+      rc = uv_tcp_getsockname(&(handle->tcp), addr, &addr_size);
+      break;
+    }
+    default: break;
+  }
+  if (rc == 0) {
+    // getnameinfo will format host and port and handle IPv4/IPv6.
+    rc = getnameinfo(addr, addr_size, hostbuf, sizeof(hostbuf), portbuf,
+                     sizeof(portbuf), NI_NUMERICSERV);
+    if (rc == 0) {
+      *out << std::string(hostbuf) << ":" << std::string(portbuf) << " ";
+    }
+
+    if (h->type == UV_TCP) {
+      // Get the remote end of the connection.
+      rc = uv_tcp_getpeername(&(handle->tcp), addr, &addr_size);
+      if (rc == 0) {
+        rc = getnameinfo(addr, addr_size, hostbuf, sizeof(hostbuf), portbuf,
+                         sizeof(portbuf), NI_NUMERICSERV);
+        if (rc == 0) {
+          *out << "connected to ";
+          *out << std::string(hostbuf) << ":" << std::string(portbuf) << " ";
+        }
+      } else if (rc == UV_ENOTCONN) {
+        *out << "(not connected) ";
+      }
+    }
+  }
+}
+
+static void reportPath(uv_handle_t* h, std::ostringstream* out) {
+  char *buffer = nullptr;
+  int rc = -1;
+  size_t size = 0;
+  uv_any_handle* handle = (uv_any_handle*)h;
+  // First call to get required buffer size.
+  switch (h->type) {
+    case UV_FS_EVENT: {
+      rc = uv_fs_event_getpath(&(handle->fs_event), buffer, &size);
+      break;
+    }
+    case UV_FS_POLL: {
+      rc = uv_fs_poll_getpath(&(handle->fs_poll), buffer, &size);
+      break;
+    }
+    default: break;
+  }
+  if (rc == UV_ENOBUFS) {
+    buffer = static_cast<char *>(malloc(size));
+    switch (h->type) {
+      case UV_FS_EVENT: {
+        rc = uv_fs_event_getpath(&(handle->fs_event), buffer, &size);
+        break;
+      }
+      case UV_FS_POLL: {
+        rc = uv_fs_poll_getpath(&(handle->fs_poll), buffer, &size);
+        break;
+      }
+      default: break;
+    }
+    if (rc == 0) {
+      // buffer is not null terminated.
+      std::string name(buffer, size);
+      *out << "filename: " << name;
+    }
+    free(buffer);
+  }
+}
+
 static void walkHandle(uv_handle_t* h, void* arg) {
   std::string type;
   std::ostringstream data;
@@ -495,47 +579,19 @@ static void walkHandle(uv_handle_t* h, void* arg) {
   uv_any_handle* handle = (uv_any_handle*)h;
 
   // List all the types so we get a compile warning if we've missed one,
-  // (using default: supresses the compiler warning.)
+  // (using default: supresses the compiler warning).
   switch (h->type) {
     case UV_UNKNOWN_HANDLE: type = "unknown"; break;
     case UV_ASYNC: type = "async"; break;
     case UV_CHECK: type = "check"; break;
     case UV_FS_EVENT: {
-      char *buffer = nullptr;
-      int rc;
-      size_t size = 0;
       type = "fs_event";
-      // First call to get required buffer size.
-      rc = uv_fs_event_getpath(&(handle->fs_event), buffer, &size);
-      if (rc == UV_ENOBUFS) {
-          buffer = (char *)malloc(size);
-          rc = uv_fs_event_getpath(&(handle->fs_event), buffer, &size);
-          if (rc == 0) {
-              // buffer is not null terminated.
-              std::string name(buffer, size);
-              data << "filename: " << name;
-          }
-          free(buffer);
-      }
+      reportPath(h, &data);
       break;
     }
     case UV_FS_POLL: {
-      char *buffer = nullptr;
-      int rc;
-      size_t size = 0;
       type = "fs_poll";
-      // First call to get required buffer size.
-      rc = uv_fs_poll_getpath(&(handle->fs_poll), buffer, &size);
-      if (rc == UV_ENOBUFS) {
-          buffer = (char *)malloc(size);
-          rc = uv_fs_poll_getpath(&(handle->fs_poll), buffer, &size);
-          if (rc == 0) {
-              // buffer is not null terminated.
-              std::string name(buffer, size);
-              data << "filename: " << name;
-          }
-          free(buffer);
-      }
+      reportPath(h, &data);
       break;
     }
     case UV_HANDLE: type = "handle"; break;
@@ -546,36 +602,8 @@ static void walkHandle(uv_handle_t* h, void* arg) {
     case UV_PROCESS: type = "process"; break;
     case UV_STREAM: type = "stream"; break;
     case UV_TCP: {
-      struct sockaddr_storage addr_storage;
-      struct sockaddr* addr = (sockaddr*)&addr_storage;
-      char hostbuf[NI_MAXHOST];
-      char portbuf[NI_MAXSERV];
-      int addr_size = sizeof(addr_storage);
-      int rc = 0;
       type = "tcp";
-
-      rc = uv_tcp_getsockname(&(handle->tcp), addr, &addr_size);
-      if (rc == 0) {
-        // getnameinfo will format host and port and handle IPv4/IPv6.
-        rc = getnameinfo(addr, addr_size, hostbuf, sizeof(hostbuf), portbuf,
-                         sizeof(portbuf), NI_NUMERICSERV);
-        if (rc == 0) {
-          data << std::string(hostbuf) << ":" << std::string(portbuf) << " ";
-        }
-
-        // Get the remote end of the connection.
-        rc = uv_tcp_getpeername(&(handle->tcp), addr, &addr_size);
-        if (rc == 0) {
-          rc = getnameinfo(addr, addr_size, hostbuf, sizeof(hostbuf), portbuf,
-                           sizeof(portbuf), NI_NUMERICSERV);
-          if (rc == 0) {
-            data << "connected to ";
-            data << std::string(hostbuf) << ":" << std::string(portbuf) << " ";
-          }
-        } else if (rc == UV_ENOTCONN) {
-          data << "(not connected) ";
-        }
-      }
+      reportEndpoints(h, &data);
       break;
     }
     case UV_TIMER: {
@@ -592,7 +620,11 @@ static void walkHandle(uv_handle_t* h, void* arg) {
       }
       break;
     }
-    case UV_UDP: type = "udp"; break;
+    case UV_UDP: {
+      type = "udp";
+      reportEndpoints(h, &data);
+      break;
+    }
     case UV_SIGNAL: {
       // SIGWINCH is used by libuv so always appears.
       // See http://docs.libuv.org/en/v1.x/signal.html
