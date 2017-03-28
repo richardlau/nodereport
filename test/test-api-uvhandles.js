@@ -14,6 +14,11 @@ if (process.argv[2] === 'child') {
   const watcher = fs.watch(__filename);
   fs.watchFile(__filename, () => {});
 
+  // Datagram socket for udp uv handles.
+  const dgram = require('dgram');
+  const udp_socket = dgram.createSocket('udp4');
+  udp_socket.bind({});
+
   // Simple server/connection to create tcp uv handles.
   const server = http.createServer((req, res) => {
     req.on('end', () => {
@@ -27,12 +32,16 @@ if (process.argv[2] === 'child') {
       server.close(() => {
         watcher.close();
         fs.unwatchFile(__filename);
+        udp_socket.close();
         process.removeListener('disconnect', exit);
       });
     });
     req.resume();
   });
   server.listen(() => {
+    const data = { udp_address: udp_socket.address(),
+                   tcp_address: server.address() };
+    process.send(data);
     http.get({port: server.address().port});
   });
 } else {
@@ -42,12 +51,14 @@ if (process.argv[2] === 'child') {
 
   const options = { encoding: 'utf8', silent: true };
   const child = fork(__filename, ['child'], options);
+  var childData;
+  child.on('message', (data) => { childData = data });
   var stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
   var stdout = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.on('exit', (code, signal) => {
-    tap.plan(11);
+    tap.plan(12);
     tap.strictSame(code, 0, 'Process should exit with expected exit code');
     tap.strictSame(signal, null, 'Process should exit cleanly');
     tap.strictSame(stderr, '', 'Checking no messages on stderr');
@@ -77,20 +88,25 @@ if (process.argv[2] === 'child') {
     // 1. The server's listening socket.
     // 2. The inbound socket making the request.
     // 3. The outbound socket sending the response.
+    const port = childData.tcp_address.port;
     const tcp_re = new RegExp('\\[RA]\\s+tcp\\s+' + address_re_str +
-                               '\\s+\\S+:(\\d+) \\(not connected\\)');
+                              '\\s+\\S+:' + port + ' \\(not connected\\)');
     tap.match(summary, tcp_re, 'Checking listening socket tcp uv handle');
-    const port = tcp_re.exec(summary)[1];
-    const out_tcp_re = new RegExp('\\[RA]\\s+tcp\\s+' + address_re_str +
-                                  '\\s+\\S+:\\d+ connected to \\S+:'
-                                  + port + '\\b');
-    tap.match(summary, out_tcp_re,
-              'Checking inbound connection tcp uv handle');
     const in_tcp_re = new RegExp('\\[RA]\\s+tcp\\s+' + address_re_str +
-                                 '\\s+\\S+:' + port +
-                                 ' connected to \\S+:\\d+\\b');
+                                 '\\s+\\S+:\\d+ connected to \\S+:'
+                                 + port + '\\b');
     tap.match(summary, in_tcp_re,
+              'Checking inbound connection tcp uv handle');
+    const out_tcp_re = new RegExp('\\[RA]\\s+tcp\\s+' + address_re_str +
+                                  '\\s+\\S+:' + port +
+                                  ' connected to \\S+:\\d+\\b');
+    tap.match(summary, out_tcp_re,
               'Checking outbound connection tcp uv handle');
+
+    // udp handles.
+    const udp_re = new RegExp('\\[RA]\\s+udp\\s+' + address_re_str +
+                              '\\s+\\S+:' + childData.udp_address.port + '\\b');
+    tap.match(summary, udp_re, 'Checking udp uv handle');
 
     // Common report tests.
     tap.test('Validating report content', (t) => {
