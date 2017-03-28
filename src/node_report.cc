@@ -691,9 +691,11 @@ static void walkHandle(uv_handle_t* h, void* arg) {
 
   *out << std::left << "[" << (uv_has_ref(h) ? 'R' : '-')
        << (uv_is_active(h) ? 'A' : '-') << "]   " << std::setw(10) << type
-       << std::internal << std::setw(2 + 2 * sizeof(void*)) << std::setfill('0')
-       << static_cast<void*>(h) << std::left << std::setfill(' ')  << "  "
-       << std::left << data.str() << std::endl;
+       << std::internal << std::setw(2 + 2 * sizeof(void*));
+  char prev_fill = out->fill('0');
+  *out << static_cast<void*>(h) << std::left;
+  out->fill(prev_fill);
+  *out << "  " << std::left << data.str() << std::endl;
 }
 
 static void WriteNodeReport(Isolate* isolate, DumpEvent event, const char* message, const char* location, char* filename, std::ostream &out, TIME_TYPE* tm_struct) {
@@ -703,6 +705,10 @@ static void WriteNodeReport(Isolate* isolate, DumpEvent event, const char* messa
 #else  // UNIX, OSX
   pid_t pid = getpid();
 #endif
+
+  // Save formatting for output stream.
+  std::ios oldState(nullptr);
+  oldState.copyfmt(out);
 
   // File stream opened OK, now start printing the report content, starting with the title
   // and header information (event, filename, timestamp and pid)
@@ -778,6 +784,9 @@ static void WriteNodeReport(Isolate* isolate, DumpEvent event, const char* messa
 
   out << "\n================================================================================\n";
   out << std::flush;
+
+  // Restore output stream formatting.
+  out.copyfmt(oldState);
 
   report_active = false;
 }
