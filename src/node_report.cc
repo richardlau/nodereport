@@ -109,6 +109,7 @@ static char report_directory[NR_MAXPATH + 1] = ""; // defaults to current workin
 std::string version_string = UNKNOWN_NODEVERSION_STRING;
 std::string commandline_string = "";
 static TIME_TYPE loadtime_tm_struct; // module load time
+static time_t load_time; // module load time absolute
 
 /*******************************************************************************
  * Functions to process node-report configuration options:
@@ -304,6 +305,7 @@ void SetLoadTime() {
   gettimeofday(&time_val, nullptr);
   localtime_r(&time_val.tv_sec, &loadtime_tm_struct);
 #endif
+  time(&load_time);
 }
 
 /*******************************************************************************
@@ -488,7 +490,7 @@ void GetNodeReport(Isolate* isolate, DumpEvent event, const char* message, const
   WriteNodeReport(isolate, event, message, location, nullptr, out, &tm_struct);
 }
 
-static void reportEndpoints(uv_handle_t* h, std::ostringstream* out) {
+static void reportEndpoints(uv_handle_t* h, std::ostringstream& out) {
   struct sockaddr_storage addr_storage;
   struct sockaddr* addr = (sockaddr*)&addr_storage;
   char hostbuf[NI_MAXHOST];
@@ -513,7 +515,7 @@ static void reportEndpoints(uv_handle_t* h, std::ostringstream* out) {
     rc = getnameinfo(addr, addr_size, hostbuf, sizeof(hostbuf), portbuf,
                      sizeof(portbuf), NI_NUMERICSERV);
     if (rc == 0) {
-      *out << std::string(hostbuf) << ":" << std::string(portbuf) << " ";
+      out << std::string(hostbuf) << ":" << std::string(portbuf);
     }
 
     if (h->type == UV_TCP) {
@@ -523,17 +525,17 @@ static void reportEndpoints(uv_handle_t* h, std::ostringstream* out) {
         rc = getnameinfo(addr, addr_size, hostbuf, sizeof(hostbuf), portbuf,
                          sizeof(portbuf), NI_NUMERICSERV);
         if (rc == 0) {
-          *out << "connected to ";
-          *out << std::string(hostbuf) << ":" << std::string(portbuf) << " ";
+          out << " connected to ";
+          out << std::string(hostbuf) << ":" << std::string(portbuf);
         }
       } else if (rc == UV_ENOTCONN) {
-        *out << "(not connected) ";
+        out << " (not connected)";
       }
     }
   }
 }
 
-static void reportPath(uv_handle_t* h, std::ostringstream* out) {
+static void reportPath(uv_handle_t* h, std::ostringstream& out) {
   char *buffer = nullptr;
   int rc = -1;
   size_t size = 0;
@@ -566,7 +568,7 @@ static void reportPath(uv_handle_t* h, std::ostringstream* out) {
     if (rc == 0) {
       // buffer is not null terminated.
       std::string name(buffer, size);
-      *out << "filename: " << name;
+      out << "filename: " << name;
     }
     free(buffer);
   }
@@ -586,29 +588,42 @@ static void walkHandle(uv_handle_t* h, void* arg) {
     case UV_CHECK: type = "check"; break;
     case UV_FS_EVENT: {
       type = "fs_event";
-      reportPath(h, &data);
+      reportPath(h, data);
       break;
     }
     case UV_FS_POLL: {
       type = "fs_poll";
-      reportPath(h, &data);
+      reportPath(h, data);
       break;
     }
     case UV_HANDLE: type = "handle"; break;
     case UV_IDLE: type = "idle"; break;
-    case UV_NAMED_PIPE: type = "pipe"; break;
+    case UV_NAMED_PIPE: {
+      type = "pipe";
+      break;
+    }
     case UV_POLL: type = "poll"; break;
     case UV_PREPARE: type = "prepare"; break;
-    case UV_PROCESS: type = "process"; break;
+    case UV_PROCESS: {
+      type = "process";
+      data << "pid: " << handle->process.pid;
+      break;
+    }
     case UV_STREAM: type = "stream"; break;
     case UV_TCP: {
       type = "tcp";
-      reportEndpoints(h, &data);
+      reportEndpoints(h, data);
       break;
     }
     case UV_TIMER: {
       type = "timer";
       data << "repeat: " << uv_timer_get_repeat(&(handle->timer));
+      // TODO timeout is not actually public however it is present in
+      // all current versions of libuv. Once uv_timer_get_timeout is
+      // in a supported level of libuv we should test for it with
+      // an #ifdef and use it instead, in case timeout moves in
+      // the future.
+      data << ", timeout in: " << ( handle->timer.timeout - uv_now(handle->timer.loop) ) << " ms";
       break;
     }
     case UV_TTY: {
@@ -616,23 +631,23 @@ static void walkHandle(uv_handle_t* h, void* arg) {
       type = "tty";
       rc = uv_tty_get_winsize(&(handle->tty), &width, &height);
       if (rc == 0) {
-        data << "width: " << width << " height: " << height << " ";
+        data << "width: " << width << ", height: " << height;
       }
       break;
     }
     case UV_UDP: {
       type = "udp";
-      reportEndpoints(h, &data);
+      reportEndpoints(h, data);
       break;
     }
     case UV_SIGNAL: {
       // SIGWINCH is used by libuv so always appears.
       // See http://docs.libuv.org/en/v1.x/signal.html
       type = "signal";
-      data << "signum: " << handle->signal.signum << " "
+      data << "signum: " << handle->signal.signum
       // node::signo_string() is not exported by Node.js on Windows.
 #ifndef _WIN32
-           << "(" << node::signo_string(handle->signal.signum) << ")"
+           << " (" << node::signo_string(handle->signal.signum) << ")"
 #endif
            ;
       break;
@@ -651,10 +666,13 @@ static void walkHandle(uv_handle_t* h, void* arg) {
     // values they contain.
     int send_size = 0;
     int recv_size = 0;
+    if (h->type == UV_TCP || h->type == UV_UDP) {
+      data << ", ";
+    }
     uv_send_buffer_size(h, &send_size);
     uv_recv_buffer_size(h, &recv_size);
     data << "send buffer size: " << send_size
-         << " recv buffer size: " << recv_size << " ";
+         << ", recv buffer size: " << recv_size;
   }
 
   if (h->type == UV_TCP || h->type == UV_NAMED_PIPE || h->type == UV_TTY ||
@@ -667,13 +685,13 @@ static void walkHandle(uv_handle_t* h, void* arg) {
     if (rc == 0) {
       switch (fd_v) {
       case 0:
-        data << "stdin"; break;
+        data << ", stdin"; break;
       case 1:
-        data << "stdout"; break;
+        data << ", stdout"; break;
       case 2:
-        data << "stderr"; break;
+        data << ", stderr"; break;
       default:
-        data << "file descriptor: " << static_cast<int>(fd_v);
+        data << ", file descriptor: " << static_cast<int>(fd_v);
         break;
       }
     }
@@ -682,10 +700,10 @@ static void walkHandle(uv_handle_t* h, void* arg) {
 
   if (h->type == UV_TCP || h->type == UV_NAMED_PIPE || h->type == UV_TTY) {
 
-    data << " write queue size "
-         << handle->stream.write_queue_size << " ";
-    data << (uv_is_readable(&handle->stream) ? " readable " : "")
-         << (uv_is_writable(&handle->stream) ? " writable ": "");
+    data << ", write queue size "
+         << handle->stream.write_queue_size;
+    data << (uv_is_readable(&handle->stream) ? ", readable" : "")
+         << (uv_is_writable(&handle->stream) ? ", writable": "");
 
   }
 
@@ -812,8 +830,13 @@ static void PrintVersionInformation(std::ostream& out) {
 
   // Print node-report module version
   // e.g. node-report version: 1.0.6 (built against Node.js v6.9.1)
-  out << "\nnode-report version: " << NODEREPORT_VERSION
-      << " (built against Node.js v" << NODE_VERSION_STRING << ")\n";
+  out << std::endl << "node-report version: " << NODEREPORT_VERSION
+      << " (built against Node.js v" << NODE_VERSION_STRING;
+#if defined(__GLIBC__)
+  out << ", glibc " << __GLIBC__ << "." << __GLIBC_MINOR__;
+#endif
+  // Print Process word size
+  out << ", " << sizeof(void *) * 8 << " bit" << ")" << std::endl;
 
   // Print operating system and machine information (Windows)
 #ifdef _WIN32
@@ -900,9 +923,11 @@ static void PrintVersionInformation(std::ostream& out) {
     out << "\nOS version: " << os_info.sysname << " " << os_info.release << " "
         << os_info.version << "\n";
 #endif
-#if defined(__GLIBC__)
-    out << "(glibc: "<< __GLIBC__ << "." << __GLIBC_MINOR__ << ")\n";
-#endif
+    const char *(*libc_version)();
+    *(void**)(&libc_version) = dlsym(RTLD_DEFAULT, "gnu_get_libc_version");
+    if (libc_version != NULL) {
+      out << "(glibc: " << (*libc_version)() << ")" << std::endl;
+    }
     out <<  "\nMachine: " << os_info.nodename << " " << os_info.machine << "\n";
   }
 #endif
@@ -1196,6 +1221,13 @@ static void PrintGCStatistics(std::ostream& out, Isolate* isolate) {
  ******************************************************************************/
 static void PrintResourceUsage(std::ostream& out) {
   char buf[64];
+  double cpu_abs;
+  double cpu_percentage;
+  time_t current_time; // current time absolute
+  time(&current_time);
+  auto uptime = difftime(current_time, load_time);
+  if (uptime == 0)
+    uptime = 1; // avoid division by zero.
   out << "\n================================================================================";
   out << "\n==== Resource Usage ============================================================\n";
 
@@ -1214,6 +1246,9 @@ static void PrintResourceUsage(std::ostream& out) {
     snprintf( buf, sizeof(buf), "%ld.%06ld", stats.ru_stime.tv_sec, stats.ru_stime.tv_usec);
     out << "\n  Kernel mode CPU: " << buf << " secs";
 #endif
+    cpu_abs = stats.ru_utime.tv_sec + 0.000001 * stats.ru_utime.tv_usec + stats.ru_stime.tv_sec + 0.000001 *  stats.ru_stime.tv_usec;
+    cpu_percentage = (cpu_abs / uptime) * 100.0;
+    out << "\n  Average CPU Consumption : "<< cpu_percentage << "%";
     out << "\n  Maximum resident set size: ";
     WriteInteger(out, stats.ru_maxrss * 1024);
     out << " bytes\n  Page faults: " << stats.ru_majflt << " (I/O required) "
@@ -1235,6 +1270,9 @@ static void PrintResourceUsage(std::ostream& out) {
     snprintf( buf, sizeof(buf), "%ld.%06ld", stats.ru_stime.tv_sec, stats.ru_stime.tv_usec);
     out << "\n  Kernel mode CPU: " << buf << " secs";
 #endif
+    cpu_abs = stats.ru_utime.tv_sec + 0.000001 * stats.ru_utime.tv_usec + stats.ru_stime.tv_sec + 0.000001 *  stats.ru_stime.tv_usec;
+    cpu_percentage = (cpu_abs / uptime) * 100.0;
+    out << "\n  Average CPU Consumption : " << cpu_percentage << "%";
     out << "\n  Filesystem activity: " << stats.ru_inblock << " reads "
         << stats.ru_oublock << " writes";
   }
