@@ -1,6 +1,16 @@
 'use strict';
 
+const child_process = require('child_process');
 const fs = require('fs');
+const os = require('os');
+
+const osMap = {
+  'aix': 'AIX',
+  'darwin': 'Darwin',
+  'linux': 'Linux',
+  'sunos': 'SunOS',
+  'win32': 'Windows',
+};
 
 const REPORT_SECTIONS = [
   'Node Report',
@@ -48,8 +58,14 @@ exports.validateContent = function validateContent(data, t, options) {
   const expectedVersions = options ?
                            options.expectedVersions || nodeComponents :
                            nodeComponents;
-  var plan = REPORT_SECTIONS.length + nodeComponents.length + 4;
+  var plan = REPORT_SECTIONS.length + nodeComponents.length + 5;
   if (options.commandline) plan++;
+  const glibcRE = /\(glibc:\s([\d.]+)/;
+  const nodeReportSection = getSection(reportContents, 'Node Report');
+  const sysInfoSection = getSection(reportContents, 'System Information');
+  const libcPath = getLibcPath(sysInfoSection);
+  const libcVersion = getLibcVersion(libcPath);
+  if (glibcRE.test(nodeReportSection) && libcVersion) plan++;
   t.plan(plan);
   // Check all sections are present
   REPORT_SECTIONS.forEach((section) => {
@@ -58,7 +74,6 @@ exports.validateContent = function validateContent(data, t, options) {
   });
 
   // Check report header section
-  const nodeReportSection = getSection(reportContents, 'Node Report');
   t.match(nodeReportSection, new RegExp('Process ID: ' + pid),
           'Node Report header section contains expected process ID');
   if (options && options.expectNodeVersion === false) {
@@ -115,12 +130,48 @@ exports.validateContent = function validateContent(data, t, options) {
             'Checking machine name in report header section contains os.hostname()');
   }
 
+  const osName = osMap[os.platform()];
+  const osVersion = nodeReportSection.match(/OS version: .*(?:\r*\n)/);
+  if (this.isWindows()) {
+    t.match(osVersion,
+            new RegExp('OS version: ' + osName), 'Checking OS version');
+  } else if (this.isAIX() && !os.release().includes('.')) {
+    // For Node.js prior to os.release() fix for AIX:
+    // https://github.com/nodejs/node/pull/10245
+    t.match(osVersion,
+            new RegExp('OS version: ' + osName + ' \\d+.' + os.release()),
+            'Checking OS version');
+  } else {
+    t.match(osVersion,
+            new RegExp('OS version: ' + osName + ' .*' + os.release()),
+            'Checking OS version');
+  }
+
   // Check report System Information section
-  const sysInfoSection = getSection(reportContents, 'System Information');
+  // If the report contains a glibc version, check it against libc.so.6
+  const glibcMatch = glibcRE.exec(nodeReportSection);
+  if (glibcMatch != null && libcVersion) {
+    t.equal(glibcMatch[1], libcVersion,
+            'Checking reported runtime glibc version against ' + libcPath);
+  }
   // Find a line which ends with "/api.node" or "\api.node" (Unix or
   // Windows paths) to see if the library for node report was loaded.
   t.match(sysInfoSection, /  .*(\/|\\)api\.node/,
     'System Information section contains node-report library.');
+};
+
+const getLibcPath = (section) => {
+  const libcMatch = /\n\s+(\/.*\/libc.so.6)\b/.exec(section);
+  return (libcMatch != null ? libcMatch[1] : undefined);
+};
+
+const getLibcVersion = (path) => {
+  if (!path) {
+    return undefined;
+  }
+  const child = child_process.spawnSync('strings', [path], {encoding: 'utf8'});
+  const match = /GNU C Library.*\bversion ([\d.]+)\b/.exec(child.stdout);
+  return (match != null ? match[1] : undefined);
 };
 
 const getSection = exports.getSection = (report, section) => {

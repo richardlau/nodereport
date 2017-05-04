@@ -9,10 +9,21 @@ if (process.argv[2] === 'child') {
   const fs = require('fs');
   const http = require('http');
   const node_report = require('../');
+  const spawn = require('child_process').spawn;
 
   // Watching files should result in fs_event/fs_poll uv handles.
   const watcher = fs.watch(__filename);
   fs.watchFile(__filename, () => {});
+
+  // Child should exist when this returns as child_process.pid must be set.
+  var child_process = spawn(process.execPath,
+    ['-e', "process.stdin.on('data', (x) => console.log(x.toString()));"]);
+
+  let timeout_count = 0;
+  let timeout = setInterval(() => { timeout_count++ }, 1000);
+  // Make sure the timer doesn't keep the test alive and let
+  // us check we detect unref'd handles correctly.
+  timeout.unref();
 
   // Datagram socket for udp uv handles.
   const dgram = require('dgram');
@@ -24,6 +35,7 @@ if (process.argv[2] === 'child') {
     req.on('end', () => {
       // Generate the report while the connection is active.
       console.log(node_report.getReport());
+      child_process.kill();
 
       res.writeHead(200, {'Content-Type': 'text/plain'});
       res.end();
@@ -58,7 +70,7 @@ if (process.argv[2] === 'child') {
   var stdout = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.on('exit', (code, signal) => {
-    tap.plan(12);
+    tap.plan(14);
     tap.strictSame(code, 0, 'Process should exit with expected exit code');
     tap.strictSame(signal, null, 'Process should exit cleanly');
     tap.strictSame(stderr, '', 'Checking no messages on stderr');
@@ -79,9 +91,19 @@ if (process.argv[2] === 'child') {
                                   __filename.replace(/\\/g,'\\\\'));
     tap.match(summary, fs_poll_re, 'Checking fs_poll uv handle');
 
+    // pid handle for the process created by child_process.spawn();
+    const pid_re = new RegExp('\\[RA]\\s+process\\s+' + address_re_str +
+                              '.+\\bpid:\\s\\d+\\b');
+    tap.match(summary, pid_re, 'Checking process uv handle');
+
+    // timer handle created by setInterval and unref'd.
+    const timeout_re = new RegExp('\\[-A]\\s+timer\\s+' + address_re_str +
+                              '.+\\brepeat: 0, timeout in: \\d+ ms\\b');
+    tap.match(summary, timeout_re, 'Checking timer uv handle');
+
     // pipe handle for the IPC channel used by child_process_fork().
     const pipe_re = new RegExp('\\[RA]\\s+pipe\\s+' + address_re_str +
-                               '.+\\breadable\\b\\s+\\bwritable\\b');
+                               '.+\\breadable, writable\\b');
     tap.match(summary, pipe_re, 'Checking pipe uv handle');
 
     // tcp handles. The report should contain three sockets:
